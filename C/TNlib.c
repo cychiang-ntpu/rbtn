@@ -4869,10 +4869,10 @@ void TADSRB(char *num_in, char *DPSPW, int language_code)
 			Retreat_a_utf8_word(temp[0], &tidx);
 			strcpy(opt_tmp, &temp[0][tidx]);
 			temp[0][tidx] = '\0';
-			remove_space(temp[0]);
 			break;
 		}
 	}
+	remove_space(temp[0]); /* "0 到 100 km": a trailing space made "0 " read as nothing */
 	// printf("%s\n", &(num_in[idx]));
 	//for (temp[1][0] = '\0'; read_a_utf8_word(num_in, word, &idx) == 0;)
 	//{
@@ -4931,7 +4931,14 @@ void TADSRB(char *num_in, char *DPSPW, int language_code)
 	}
 	else if ((strncmp(temp[1], "2", 1) == 0 || strncmp(temp[1], Number[12], 3) == 0) && utf8_word_length(temp[1]) == 1)
 	{
-		STFNVI(temp[0], &(DPSPW[strlen(DPSPW)]));
+		if (has_dot(temp[0]) == 1)
+		{
+			DPTSFW(temp[0], &(DPSPW[strlen(DPSPW)]), 1); /* 1.5~2萬 -> 一點五到兩萬, not 一五到兩萬 */
+		}
+		else
+		{
+			STFNVI(temp[0], &(DPSPW[strlen(DPSPW)]));
+		}
 		strcat(DPSPW, opt_tmp);
 		if (patch_dao == 1)
 		{
@@ -5247,7 +5254,10 @@ void URLNOR(char *URL, char *nor_url, int language_code)
 {
 	int i, idx, ret, abyte_idx, abyte_capacity;
 	char word[7], **abyte, twobyteutf8[3];
-	char *temp = (char *)malloc((strlen(URL) + 1) * sizeof(char));
+	/* BYTRAN may expand every "%XY" (3 bytes) into 趴 + two Chinese digits (9 bytes),
+	   so temp must be several times the URL length or long percent-encoded URLs
+	   overflow the heap (crashed on e.g. grinews.com/news/%e7%a7%91...). */
+	char *temp = (char *)malloc((strlen(URL) * 4 + 16) * sizeof(char));
 
 	abyte_capacity = ((int)(strlen(URL) / 3) + 1);
 	abyte = (char **)malloc(abyte_capacity * sizeof(char *));
@@ -5451,6 +5461,10 @@ int get_heximal_val(char *word)
 		{
 			return word[0] - 55;
 		}
+		else if (word[0] >= 97 && word[0] <= 102) /* lowercase %e7 style */
+		{
+			return word[0] - 87;
+		}
 	}
 	else if (len == 3)
 	{
@@ -5475,7 +5489,7 @@ int isheximalC(char *word)
 
 	if (len == 1)
 	{
-		if ((word[0] >= 48 && word[0] <= 57) || (word[0] >= 65 && word[0] <= 70))
+		if ((word[0] >= 48 && word[0] <= 57) || (word[0] >= 65 && word[0] <= 70) || (word[0] >= 97 && word[0] <= 102))
 		{
 			return 1;
 		}
@@ -6667,6 +6681,21 @@ void CMFSFW(char *raw, char *modify, int language_code)
 				strcat(modify, "equal ");
 			}
 		}
+		else if (isPercentage(word) == 1)
+		{
+			/* 999+10% -> 九百九十九加百分之十 */
+			if (language_code == 1)
+			{
+				strcat(modify, ch_percent);
+				N2SWND(temp, &modify[strlen(modify)], language_code);
+			}
+			else
+			{
+				N2SWND(temp, &modify[strlen(modify)], language_code);
+				strcat(modify, "percent ");
+			}
+			temp[0] = '\0';
+		}
 		else if (isCJK_words(word) == 1)
 		{
 			N2SWND(temp, &modify[strlen(modify)], language_code);
@@ -6775,7 +6804,7 @@ void ECCWPS(char *raw, char *modify, int language_code)
 void ABOYTY(char *raw, char *modify, int language_code)
 {
 	int i, idx, csize;
-	char word[7], year1[25], year2[25];
+	char word[7], year1[25], year2[25], rollover[16];
 	char *temp;
 
 	for (idx = 0, year1[0] = '\0'; read_a_utf8_word(raw, word, &idx) == 0;)
@@ -6824,18 +6853,50 @@ void ABOYTY(char *raw, char *modify, int language_code)
 	}
 	// printf("HERE:%s %s\n", &year1[idx], year2);
 	// printf("HERE:%d %d\n", myatoi(&year1[idx]), myatoi(year2));
+	rollover[0] = '\0';
 	if (myatoi(&year1[idx]) > myatoi(year2))
 	{
-		strcpy(modify, raw);
-		return;
+		/* e.g. 1999-00: a two-digit second year that follows the tail of the
+		   first year means the century rolled over -> 1999-2000 */
+		if (csize == 2 && utf8_word_length(year1) == 4 && (myatoi(&year1[idx]) + 1) % 100 == myatoi(year2))
+		{
+			sprintf(rollover, "%d", myatoi(year1) - myatoi(&year1[idx]) + 100 + myatoi(year2));
+		}
+		else
+		{
+			strcpy(modify, raw);
+			return;
+		}
 	}
 
-	temp = (char *)malloc((strlen(raw) + 8) * sizeof(char));
+	temp = (char *)malloc((strlen(raw) + 16) * sizeof(char));
 	for (idx = 0, temp[0] = '\0'; read_a_utf8_word(raw, word, &idx) == 0;)
 	{
 		if (isDash(word) == 1 || isTilde(word) == 1)
 		{
 			strcat(temp, ch_dao);
+			if (rollover[0] != '\0')
+			{
+				/* skip the original two-digit year and emit the full year instead */
+				for (; read_a_utf8_word(raw, word, &idx) == 0;)
+				{
+					if (isNumber(word) == 1)
+					{
+						break;
+					}
+					strcat(temp, word);
+				}
+				for (; read_a_utf8_word(raw, word, &idx) == 0 && isNumber(word) == 1;)
+				{
+				}
+				strcat(temp, rollover);
+				if (word[0] != '\0')
+				{
+					Retreat_a_utf8_word(raw, &idx);
+				}
+				strcat(temp, &raw[idx]);
+				break;
+			}
 			strcat(temp, &raw[idx]);
 			break;
 		}
@@ -7852,7 +7913,7 @@ void N2SSTF_LD(char *num_in, char *DPSPW, int language_code)
 		N2SWND(num_in, &(DPSPW[strlen(DPSPW)]), language_code);
 		flag = 1;
 	}
-	if (language_code == 2)
+	if (language_code == 2 && flag == 0) /* a special case above already produced the reading */
 	{
 		NEIWND(num_in, DPSPW, language_code);
 		flag = 1;
